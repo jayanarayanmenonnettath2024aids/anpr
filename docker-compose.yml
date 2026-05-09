@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/plates:/app/plates
+      - ./data:/app/data
+    environment:
+      - VIDEO_SOURCE=video.mp4
+      - CAMERA_ID=CAM-01
+      - OCR_ENGINE=paddleocr
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
