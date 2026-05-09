@@ -48,9 +48,23 @@ class OCREngine:
                 self._init_engine("tesseract", lang, use_angle_cls)
                 return
 
+        elif engine == "easyocr":
+            try:
+                import easyocr
+                # Disable GPU if no CUDA is available, usually CPU is fine for small plates
+                self.ocr = easyocr.Reader(['en'], gpu=False, verbose=False)
+                self.engine_name = "easyocr"
+                logger.info("EasyOCR initialized successfully")
+            except ImportError:
+                logger.error("EasyOCR not installed! Run: pip install easyocr")
+                self.ocr = None
         elif engine == "tesseract":
             try:
                 import pytesseract
+                import os
+                # Set tesseract path for Windows if installed via winget
+                if os.name == 'nt' and os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+                    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
                 self.ocr = pytesseract
                 self.engine_name = "tesseract"
                 logger.info("Tesseract OCR initialized")
@@ -79,6 +93,8 @@ class OCREngine:
                 return self._paddle_ocr(plate_image)
             elif self.engine_name == "tesseract":
                 return self._tesseract_ocr(plate_image)
+            elif self.engine_name == "easyocr":
+                return self._easyocr_ocr(plate_image)
         except Exception as e:
             logger.error(f"OCR error: {e}")
             return None, 0.0
@@ -115,6 +131,33 @@ class OCREngine:
 
         return cleaned, avg_confidence
 
+    def _easyocr_ocr(self, image):
+        """Run EasyOCR."""
+        result = self.ocr.readtext(image)
+        if not result:
+            return None, 0.0
+
+        texts = []
+        confidences = []
+
+        for bbox, text, conf in result:
+            texts.append(text)
+            confidences.append(conf)
+
+        if not texts:
+            return None, 0.0
+
+        combined_text = " ".join(texts)
+        avg_confidence = sum(confidences) / len(confidences)
+
+        # Normalize
+        cleaned = self._normalize_plate_text(combined_text)
+
+        if avg_confidence < self.confidence_threshold:
+            return None, avg_confidence
+
+        return cleaned, avg_confidence
+
     def _tesseract_ocr(self, image):
         """Run Tesseract OCR."""
         import cv2
@@ -125,7 +168,7 @@ class OCREngine:
 
         # Tesseract config for license plates
         config = (
-            "--oem 3 --psm 7 "
+            "--oem 3 --psm 6 "
             "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         )
 

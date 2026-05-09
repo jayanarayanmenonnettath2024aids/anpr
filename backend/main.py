@@ -79,6 +79,7 @@ pipeline_running = False
 pipeline_thread = None
 latest_annotated_frame = None
 frame_lock = threading.Lock()
+main_loop = None
 
 
 def run_pipeline():
@@ -171,8 +172,17 @@ def run_pipeline():
 
         # ─── Step 4: Plate Detection & OCR ────────────────────────
         for (vx, vy, vw, vh) in triggered:
+            # Add padding to the vehicle bounding box to ensure we capture the bumper/plate
+            # even if the motion detector only caught the headlights
+            pad_x = 100
+            pad_y = 100
+            x1 = max(0, vx - pad_x)
+            y1 = max(0, vy - pad_y)
+            x2 = min(roi.shape[1], vx + vw + pad_x)
+            y2 = min(roi.shape[0], vy + vh + pad_y)
+            
             # Get vehicle region from ROI
-            vehicle_region = roi[vy: vy + vh, vx: vx + vw]
+            vehicle_region = roi[y1: y2, x1: x2]
             if vehicle_region.size == 0:
                 continue
 
@@ -215,19 +225,14 @@ def run_pipeline():
                     }
 
                     # Schedule async tasks
-                    if loop is None:
+                    if main_loop is not None:
                         try:
-                            loop = asyncio.get_event_loop()
-                        except RuntimeError:
-                            loop = asyncio.new_event_loop()
-
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            _handle_detection(detection_data, image_filename, is_blacklisted),
-                            loop,
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to schedule detection: {e}")
+                            asyncio.run_coroutine_threadsafe(
+                                _handle_detection(detection_data, image_filename, is_blacklisted),
+                                main_loop,
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to schedule detection: {e}")
 
                     # Draw detection on display frame
                     dx = Config.ROI_X1 if Config.ROI_ENABLED else 0
@@ -235,14 +240,14 @@ def run_pipeline():
                     px, py, pw, ph = bbox
                     cv2.rectangle(
                         display_frame,
-                        (px + vx + dx, py + vy + dy),
-                        (px + vx + dx + pw, py + vy + dy + ph),
+                        (px + x1 + dx, py + y1 + dy),
+                        (px + x1 + dx + pw, py + y1 + dy + ph),
                         (255, 0, 255), 2,
                     )
                     cv2.putText(
                         display_frame,
                         f"{text} ({confidence:.0%})",
-                        (px + vx + dx, py + vy + dy - 8),
+                        (px + x1 + dx, py + y1 + dy - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2,
                     )
 
@@ -308,7 +313,9 @@ async def stream_frames():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown."""
-    global pipeline_running, pipeline_thread
+    global pipeline_running, pipeline_thread, main_loop
+
+    main_loop = asyncio.get_running_loop()
 
     logger.info("=" * 60)
     logger.info("  ANPR System Starting...")

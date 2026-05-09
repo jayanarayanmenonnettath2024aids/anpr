@@ -106,6 +106,9 @@ class Preprocessor:
         # Adaptive threshold for clean black/white text
         thresh = self.apply_adaptive_threshold(enhanced)
 
+        # Add a white border (padding) which significantly improves Tesseract accuracy
+        thresh = cv2.copyMakeBorder(thresh, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+
         return thresh
 
     @staticmethod

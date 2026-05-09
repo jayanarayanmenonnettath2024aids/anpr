@@ -13,8 +13,8 @@ class Config:
     # ─── ROI Cropping (y1, y2, x1, x2) ────────────────────────────
     # Set to None to process full frame. Adjust for your camera.
     ROI_ENABLED = True
-    ROI_Y1 = int(os.getenv("ROI_Y1", "250"))
-    ROI_Y2 = int(os.getenv("ROI_Y2", "800"))
+    ROI_Y1 = int(os.getenv("ROI_Y1", "400"))   # Start searching around the middle of the screen
+    ROI_Y2 = int(os.getenv("ROI_Y2", "720"))   # Stop at the bottom (video is 720p)
     ROI_X1 = int(os.getenv("ROI_X1", "200"))
     ROI_X2 = int(os.getenv("ROI_X2", "1400"))
 
@@ -25,16 +25,16 @@ class Config:
     MIN_CONTOUR_AREA = 5000  # px² — ignore contours smaller than this
 
     # ─── Trigger Zone ─────────────────────────────────────────────
-    TRIGGER_ZONE_ENABLED = True
-    TRIGGER_LINE_Y = 400       # Y position of trigger line within ROI
+    TRIGGER_ZONE_ENABLED = False
+    TRIGGER_LINE_Y = 600       # Y position of trigger line within ROI
     TRIGGER_TOLERANCE = 40     # px tolerance around the line
     TRIGGER_COOLDOWN = 2.0     # seconds cooldown per tracked object
 
     # ─── Plate Detection ──────────────────────────────────────────
-    PLATE_MIN_ASPECT_RATIO = 1.5   # width / height
-    PLATE_MAX_ASPECT_RATIO = 6.0
-    PLATE_MIN_AREA = 800
-    PLATE_MAX_AREA = 50000
+    PLATE_MIN_ASPECT_RATIO = 2.0
+    PLATE_MAX_ASPECT_RATIO = 5.5
+    PLATE_MIN_AREA = 800           # small plates
+    PLATE_MAX_AREA = 6000          # Reject massive truck banners! (They are usually > 15,000px)
     PLATE_APPROX_EPSILON = 0.02    # fraction of perimeter for approxPolyDP
     PLATE_MAX_CANDIDATES = 10      # max contours to evaluate
 
@@ -49,13 +49,13 @@ class Config:
     MORPH_KERNEL_SIZE = (3, 3)
 
     # ─── OCR ──────────────────────────────────────────────────────
-    OCR_ENGINE = os.getenv("OCR_ENGINE", "paddleocr")  # "paddleocr" or "tesseract"
+    OCR_ENGINE = os.getenv("OCR_ENGINE", "tesseract")  # "paddleocr", "tesseract", or "easyocr"
     OCR_LANGUAGE = "en"
-    OCR_CONFIDENCE_THRESHOLD = 0.4
+    OCR_CONFIDENCE_THRESHOLD = 0.2
     OCR_USE_ANGLE_CLS = True
 
     # ─── Sharpness Selection ─────────────────────────────────────
-    SHARPNESS_THRESHOLD = 50.0  # Laplacian variance — reject below this
+    SHARPNESS_THRESHOLD = 5.0  # Laplacian variance — reject below this
 
     # ─── Performance ──────────────────────────────────────────────
     FRAME_SKIP = 3          # process every Nth frame

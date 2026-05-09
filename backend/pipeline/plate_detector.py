@@ -65,76 +65,39 @@ class PlateDetector:
             if area < self.min_area or area > self.max_area:
                 continue
 
-            # Approximate contour to polygon
-            peri = cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, self.approx_epsilon * peri, True)
+            # Get bounding box
+            x, y, w, h = cv2.boundingRect(contour)
 
-            # License plates are rectangles (4 corners)
-            if len(approx) == 4:
-                x, y, w, h = cv2.boundingRect(approx)
+            # Check aspect ratio
+            if h == 0:
+                continue
+            aspect_ratio = w / h
 
-                # Check aspect ratio
-                if h == 0:
-                    continue
-                aspect_ratio = w / h
+            if self.min_aspect_ratio <= aspect_ratio <= self.max_aspect_ratio:
+                # Add slight padding to the plate bounding box
+                p_x, p_y = 5, 5
+                cx1 = max(0, x - p_x)
+                cy1 = max(0, y - p_y)
+                cx2 = min(frame.shape[1], x + w + p_x)
+                cy2 = min(frame.shape[0], y + h + p_y)
+                
+                # Crop the plate region from original frame
+                plate_img = frame[cy1:cy2, cx1:cx2]
 
-                if self.min_aspect_ratio <= aspect_ratio <= self.max_aspect_ratio:
-                    # Crop the plate region from original frame
-                    plate_img = frame[y: y + h, x: x + w]
-
-                    if plate_img.size == 0:
-                        continue
-
-                    # Check sharpness
-                    sharpness = Preprocessor.compute_sharpness(plate_img)
-
-                    candidates.append({
-                        "plate_image": plate_img,
-                        "bbox": (x, y, w, h),
-                        "sharpness": sharpness,
-                        "contour": approx,
-                        "aspect_ratio": aspect_ratio,
-                        "area": area,
-                    })
-
-            # Also try rotated rectangle for angled plates
-            elif len(approx) >= 4:
-                rect = cv2.minAreaRect(contour)
-                (cx, cy), (w_r, h_r), angle = rect
-
-                if w_r == 0 or h_r == 0:
+                if plate_img.size == 0:
                     continue
 
-                # Ensure width > height
-                if w_r < h_r:
-                    w_r, h_r = h_r, w_r
-                    angle += 90
+                # Check sharpness
+                sharpness = Preprocessor.compute_sharpness(plate_img)
 
-                aspect_ratio = w_r / h_r
-                rect_area = w_r * h_r
-
-                if (
-                    self.min_area <= rect_area <= self.max_area
-                    and self.min_aspect_ratio <= aspect_ratio <= self.max_aspect_ratio
-                    and abs(angle) < 30  # Not too rotated
-                ):
-                    # Get bounding rect for crop
-                    x, y, w, h = cv2.boundingRect(contour)
-                    plate_img = frame[y: y + h, x: x + w]
-
-                    if plate_img.size == 0:
-                        continue
-
-                    sharpness = Preprocessor.compute_sharpness(plate_img)
-
-                    candidates.append({
-                        "plate_image": plate_img,
-                        "bbox": (x, y, w, h),
-                        "sharpness": sharpness,
-                        "contour": approx,
-                        "aspect_ratio": aspect_ratio,
-                        "area": rect_area,
-                    })
+                candidates.append({
+                    "plate_image": plate_img,
+                    "bbox": (x, y, w, h),
+                    "sharpness": sharpness,
+                    "contour": contour,
+                    "aspect_ratio": aspect_ratio,
+                    "area": area,
+                })
 
         # Sort by sharpness (sharpest first) and limit
         candidates.sort(key=lambda c: c["sharpness"], reverse=True)

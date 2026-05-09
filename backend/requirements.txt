@@ -8,10 +8,9 @@ numpy>=1.26.0
 pydantic>=2.0.0
 python-multipart==0.0.9
 
-# OCR — install one or both:
-# Primary (recommended):
-paddleocr>=2.7.0
-paddlepaddle>=2.6.0
+# Primary (recommended but not supported on Python 3.13+):
+# paddleocr>=2.7.0
+# paddlepaddle>=2.6.0
 
-# Fallback:
-# pytesseract>=0.3.10
+# Fallback (using this due to Python version):
+pytesseract>=0.3.10
