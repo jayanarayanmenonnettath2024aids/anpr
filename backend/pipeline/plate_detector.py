@@ -51,7 +51,7 @@ class PlateDetector:
 
         # Find contours on edge image
         contours, _ = cv2.findContours(
-            edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+            edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
         # Sort by area (largest first) and take top candidates
@@ -59,6 +59,9 @@ class PlateDetector:
         contours = contours[: self.max_candidates * 3]  # pre-filter
 
         candidates = []
+
+        frame_area = frame.shape[0] * frame.shape[1]
+        ideal_aspect_ratio = 4.0
 
         for contour in contours:
             area = cv2.contourArea(contour)
@@ -74,8 +77,20 @@ class PlateDetector:
             aspect_ratio = w / h
 
             if self.min_aspect_ratio <= aspect_ratio <= self.max_aspect_ratio:
-                # Add slight padding to the plate bounding box
-                p_x, p_y = 5, 5
+                rectangularity = area / float(max(w * h, 1))
+                aspect_score = max(0.0, 1.0 - (abs(aspect_ratio - ideal_aspect_ratio) / ideal_aspect_ratio))
+                size_score = min((w * h) / float(max(frame_area * 0.08, 1.0)), 1.0)
+                contour_area_ratio = area / float(max(frame_area, 1))
+
+                # Reject obvious non-plate textures such as road surface or large
+                # body panels by requiring a compact contour with meaningful fill.
+                if rectangularity < 0.38 or contour_area_ratio < 0.0008:
+                    continue
+
+                # Add a light padding so the crop keeps the full plate while
+                # avoiding too much of the car body or surrounding scene.
+                p_x = max(8, int(w * 0.18))
+                p_y = max(6, int(h * 0.22))
                 cx1 = max(0, x - p_x)
                 cy1 = max(0, y - p_y)
                 cx2 = min(frame.shape[1], x + w + p_x)
@@ -97,11 +112,57 @@ class PlateDetector:
                     "contour": contour,
                     "aspect_ratio": aspect_ratio,
                     "area": area,
+                    "rectangularity": rectangularity,
+                    "aspect_score": aspect_score,
+                    "size_score": size_score,
+                    "contour_area_ratio": contour_area_ratio,
                 })
 
-        # Sort by sharpness (sharpest first) and limit
-        candidates.sort(key=lambda c: c["sharpness"], reverse=True)
-        candidates = candidates[: self.max_candidates]
+        # Sort by plate-likeness first, then sharpness.
+        for candidate in candidates:
+            candidate["score"] = (
+                candidate["sharpness"] * 0.45
+                + candidate["rectangularity"] * 60.0
+                + candidate["aspect_score"] * 35.0
+                + candidate["size_score"] * 10.0
+                + candidate["contour_area_ratio"] * 4000.0
+            )
+
+        candidates.sort(key=lambda c: (c["score"], c["sharpness"]), reverse=True)
+
+        # Suppress highly overlapping fragments so the same plate is not
+        # emitted multiple times from partial contours.
+        selected = []
+        for candidate in candidates:
+            cx, cy, cw, ch = candidate["bbox"]
+            candidate_area = cw * ch
+            overlapped = False
+
+            for picked in selected:
+                px, py, pw, ph = picked["bbox"]
+                inter_x1 = max(cx, px)
+                inter_y1 = max(cy, py)
+                inter_x2 = min(cx + cw, px + pw)
+                inter_y2 = min(cy + ch, py + ph)
+
+                if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+                    continue
+
+                intersection = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                union = candidate_area + (pw * ph) - intersection
+                iou = intersection / float(max(union, 1))
+
+                if iou >= 0.45:
+                    overlapped = True
+                    break
+
+            if not overlapped:
+                selected.append(candidate)
+
+            if len(selected) >= self.max_candidates:
+                break
+
+        candidates = selected
 
         # Filter by sharpness threshold
         candidates = [
@@ -111,7 +172,7 @@ class PlateDetector:
         if candidates:
             logger.debug(
                 f"Found {len(candidates)} plate candidate(s), "
-                f"best sharpness: {candidates[0]['sharpness']:.1f}"
+                f"best score: {candidates[0]['score']:.1f}"
             )
 
         return candidates
@@ -128,7 +189,15 @@ class PlateDetector:
             list of plate candidates with global coordinates
         """
         vx, vy, vw, vh = vehicle_bbox
-        vehicle_roi = frame[vy: vy + vh, vx: vx + vw]
+        # Use only the lower-middle of the vehicle body. This avoids ground,
+        # roofline, and neighboring car fragments that often get picked up by
+        # the motion box but are not part of the license plate area.
+        sx1 = vx + int(vw * 0.08)
+        sx2 = vx + int(vw * 0.92)
+        sy1 = vy + int(vh * 0.28)
+        sy2 = vy + int(vh * 0.88)
+
+        vehicle_roi = frame[sy1:sy2, sx1:sx2]
 
         if vehicle_roi.size == 0:
             return []
@@ -138,6 +207,6 @@ class PlateDetector:
         # Adjust coordinates to global frame
         for c in candidates:
             bx, by, bw, bh = c["bbox"]
-            c["bbox"] = (bx + vx, by + vy, bw, bh)
+            c["bbox"] = (bx + sx1, by + sy1, bw, bh)
 
         return candidates

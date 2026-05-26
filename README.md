@@ -12,15 +12,15 @@ Camera/Video → ROI Crop → Motion Detection (MOG2) → Contour Detection
 
 ## Tech Stack
 
-| Component | Technology |
-|-----------|-----------|
-| Video Processing | OpenCV (contour-based) |
-| Motion Detection | MOG2 Background Subtraction |
-| OCR | PaddleOCR (primary) / Tesseract (fallback) |
-| Backend | FastAPI + WebSocket |
-| Frontend | React + Vite |
-| Database | SQLite (async) |
-| Deployment | Docker Compose |
+|  Component             | Technology                                 |
+|------------------------|--------------------------------------------|
+| Video Processing       | OpenCV (contour-based)                     |
+| Motion Detection       | MOG2 Background Subtraction                |
+| OCR                    | PaddleOCR (primary) / Tesseract (fallback) |
+| Backend                | FastAPI + WebSocket                        |
+| Frontend               | React + Vite                               |
+| Database               | SQLite (async)                             |
+| Deployment             | Docker Compose                             |
 
 ## Quick Start
 
@@ -64,15 +64,15 @@ All parameters are in `backend/config.py`:
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| WS | `/ws/detections` | Real-time plate detection events (JSON) |
-| WS | `/ws/live-feed` | Live annotated video stream (binary JPEG) |
-| GET | `/api/history` | Paginated plate history |
-| GET | `/api/history/export` | CSV export |
-| GET | `/api/stats` | Pipeline statistics |
-| GET/POST/DELETE | `/api/blacklist` | Blacklist management |
-| GET | `/api/config` | Current configuration |
+| Method          | Endpoint              | Description                               |
+|-----------------|-----------------------|-------------------------------------------|
+| WS              | `/ws/detections`      | Real-time plate detection events (JSON)   |
+| WS              | `/ws/live-feed`       | Live annotated video stream (binary JPEG) |
+| GET             | `/api/history`        | Paginated plate history                   |
+| GET             | `/api/history/export` | CSV export                                |
+| GET             | `/api/stats`          | Pipeline statistics                       |
+| GET/POST/DELETE | `/api/blacklist`      | Blacklist management                      |
+| GET             | `/api/config`         | Current configuration                     |
 
 ## Performance
 

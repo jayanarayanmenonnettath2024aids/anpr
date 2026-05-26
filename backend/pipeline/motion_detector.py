@@ -16,7 +16,7 @@ class MotionDetector:
             detectShadows=detect_shadows,
         )
         self.min_contour_area = min_contour_area
-        self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
     def detect(self, frame):
         """
@@ -37,8 +37,8 @@ class MotionDetector:
 
         # Morphological operations to remove noise and fill gaps
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self.kernel, iterations=1)
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, self.kernel, iterations=2)
-        fg_mask = cv2.dilate(fg_mask, self.kernel, iterations=2)
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, self.kernel, iterations=1)
+        fg_mask = cv2.dilate(fg_mask, self.kernel, iterations=1)
 
         # Find contours
         contours, _ = cv2.findContours(

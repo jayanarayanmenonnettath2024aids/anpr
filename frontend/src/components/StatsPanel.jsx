@@ -66,8 +66,8 @@ export default function StatsPanel({ detectionCount }) {
       </div>
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        marginTop: '12px', padding: '8px 10px', borderRadius: 'var(--radius-sm)',
-        background: 'rgba(16, 185, 129, 0.06)', border: '1px solid rgba(16, 185, 129, 0.15)',
+        marginTop: '12px', padding: '10px 12px', borderRadius: 'var(--radius-sm)',
+        background: 'rgba(16, 185, 129, 0.08)', border: '1px solid rgba(16, 185, 129, 0.2)',
       }}>
         <span style={{ fontSize: '0.7rem', color: 'var(--accent-green)', fontWeight: 600 }}>
           ● Pipeline {stats.pipeline_status}

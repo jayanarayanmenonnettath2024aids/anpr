@@ -15,6 +15,8 @@ export function useDetectionSocket() {
   const wsRef = useRef(null);
   const reconnectAttempt = useRef(0);
   const reconnectTimer = useRef(null);
+  const recentMap = useRef(new Map()); // key -> { lastSeen, confidence }
+  const DEDUP_WINDOW_MS = 30 * 1000; // 30 seconds
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -32,12 +34,44 @@ export function useDetectionSocket() {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'ping') return; // Keepalive
+        const plateKey = normalizePlate(data.plate_text || '');
+        const key = plateKey || data.id || '';
+        const now = Date.now();
+        const confidence = Number(data.confidence || 0);
 
-        setLatestDetection(data);
-        setDetections(prev => [data, ...prev].slice(0, 50)); // Keep last 50
+        // Purge old entries lazily and keep one visible row per plate.
+        const lastRecord = recentMap.current.get(key);
+        if (lastRecord && (now - lastRecord.lastSeen) < DEDUP_WINDOW_MS) {
+          // Keep only the best capture for the same plate.
+          if (confidence <= lastRecord.confidence) {
+            recentMap.current.set(key, { ...lastRecord, lastSeen: now });
+            return;
+          }
+
+          const upgraded = { ...data, _dedupKey: key };
+          recentMap.current.set(key, { lastSeen: now, confidence });
+          setLatestDetection(upgraded);
+          setDetections(prev => {
+            const next = prev.filter(item => (item._dedupKey || normalizePlate(item.plate_text || '')) !== key);
+            return [upgraded, ...next].slice(0, 50);
+          });
+
+          if (data.is_blacklisted) {
+            setBlacklistAlert(upgraded);
+          }
+          return;
+        }
+
+        recentMap.current.set(key, { lastSeen: now, confidence });
+        const nextData = { ...data, _dedupKey: key };
+        setLatestDetection(nextData);
+        setDetections(prev => {
+          const next = prev.filter(item => (item._dedupKey || normalizePlate(item.plate_text || '')) !== key);
+          return [nextData, ...next].slice(0, 50);
+        }); // Keep last 50 unique plates
 
         if (data.is_blacklisted) {
-          setBlacklistAlert(data);
+          setBlacklistAlert(nextData);
         }
       } catch (e) {
         // Non-JSON message, ignore
@@ -69,13 +103,26 @@ export function useDetectionSocket() {
 
   useEffect(() => {
     connect();
+    // Periodically purge old dedup entries to avoid memory growth
+    const purgeTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [k, t] of recentMap.current.entries()) {
+        if (now - t > DEDUP_WINDOW_MS) recentMap.current.delete(k);
+      }
+    }, 5000);
     return () => {
       clearTimeout(reconnectTimer.current);
+      clearInterval(purgeTimer);
       if (wsRef.current) wsRef.current.close();
     };
   }, [connect]);
 
   return { detections, latestDetection, blacklistAlert, connectionStatus, dismissBlacklistAlert };
+}
+
+function normalizePlate(s) {
+  if (!s) return '';
+  return s.toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/\s+/g, '');
 }
 
 export function useFeedSocket() {

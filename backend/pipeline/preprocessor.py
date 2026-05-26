@@ -37,12 +37,9 @@ class Preprocessor:
 
     def apply_bilateral_filter(self, gray):
         """Edge-preserving noise reduction."""
-        return cv2.bilateralFilter(
-            gray,
-            self.bilateral_d,
-            self.bilateral_sigma_color,
-            self.bilateral_sigma_space,
-        )
+        # Gaussian blur is significantly cheaper than bilateral filtering and
+        # is enough for the contour-based plate detector.
+        return cv2.GaussianBlur(gray, (5, 5), 0)
 
     def apply_adaptive_threshold(self, gray):
         """Adaptive thresholding for varying lighting conditions."""
@@ -96,18 +93,21 @@ class Preprocessor:
             scale = 64.0 / h
             gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
-        # Denoise
-        denoised = cv2.fastNlMeansDenoising(gray, h=10)
+        # Keep OCR preprocessing lightweight for real-time throughput.
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        enhanced = cv2.equalizeHist(blurred)
 
-        # Increase contrast using CLAHE
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(denoised)
-
-        # Adaptive threshold for clean black/white text
-        thresh = self.apply_adaptive_threshold(enhanced)
+        # Otsu threshold works well enough for most plate crops and is cheaper
+        # than adaptive thresholding.
+        _, thresh = cv2.threshold(
+            enhanced,
+            0,
+            255,
+            cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+        )
 
         # Add a white border (padding) which significantly improves Tesseract accuracy
-        thresh = cv2.copyMakeBorder(thresh, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+        thresh = cv2.copyMakeBorder(thresh, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
         return thresh
 

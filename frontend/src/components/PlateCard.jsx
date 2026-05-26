@@ -20,7 +20,7 @@ function formatTime(timestamp) {
 }
 
 export default function PlateCard({ detection }) {
-  const { plate_text, confidence, timestamp, camera_id, image_url, is_blacklisted } = detection;
+  const { plate_text, confidence, timestamp, camera_id, image_url } = detection;
   const confLevel = getConfidenceLevel(confidence);
   const imageUrl = getPlateImageUrl(image_url);
 
@@ -40,12 +40,6 @@ export default function PlateCard({ detection }) {
         )}
       </div>
       <div className="plate-card-info">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span className="plate-number">{plate_text}</span>
-          {is_blacklisted && (
-            <span className="plate-blacklist-badge">⚠ ALERT</span>
-          )}
-        </div>
         <div className="plate-meta">
           <span className="plate-time">{formatTime(timestamp)}</span>
           <span className={`plate-confidence ${confLevel}`}>

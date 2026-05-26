@@ -82,6 +82,38 @@ frame_lock = threading.Lock()
 main_loop = None
 
 
+def select_primary_motion_box(bounding_boxes, frame_width, frame_height):
+    """
+    Pick the most likely target vehicle from multiple motion boxes.
+
+    Prefers large boxes near the center of the ROI, which works better for a
+    single-lane or single-car scene than processing every moving object.
+    """
+    if not bounding_boxes:
+        return None
+
+    center_x = frame_width / 2.0
+    center_y = frame_height * 0.72
+
+    best_box = None
+    best_score = None
+
+    for (x, y, w, h) in bounding_boxes:
+        area = w * h
+        box_center_x = x + (w / 2.0)
+        box_center_y = y + (h / 2.0)
+        distance = abs(box_center_x - center_x) / max(frame_width, 1) + abs(box_center_y - center_y) / max(frame_height, 1)
+
+        # Larger and more centered boxes win.
+        score = area - (distance * area * 1.5)
+
+        if best_score is None or score > best_score:
+            best_score = score
+            best_box = (x, y, w, h)
+
+    return best_box
+
+
 def run_pipeline():
     """
     Main processing pipeline — runs in a background thread.
@@ -137,15 +169,20 @@ def run_pipeline():
         # ─── Step 2: Motion Detection ─────────────────────────────
         bounding_boxes, fg_mask = motion_detector.detect(roi)
 
-        # Draw motion contours on display frame
-        for (x, y, w, h) in bounding_boxes:
+        # Keep only the most likely target vehicle in single-car scenes.
+        primary_box = select_primary_motion_box(bounding_boxes, roi.shape[1], roi.shape[0])
+        triggered = [primary_box] if primary_box is not None else []
+
+        # Draw only the selected target box to avoid clutter from other cars.
+        if primary_box is not None:
+            x, y, w, h = primary_box
             dx = Config.ROI_X1 if Config.ROI_ENABLED else 0
             dy = Config.ROI_Y1 if Config.ROI_ENABLED else 0
             cv2.rectangle(
                 display_frame,
                 (x + dx, y + dy),
                 (x + dx + w, y + dy + h),
-                (0, 255, 0), 1,
+                (0, 255, 0), 2,
             )
 
         # ─── Step 3: Trigger Zone Check ───────────────────────────
@@ -166,16 +203,14 @@ def run_pipeline():
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1,
             )
 
-            triggered = trigger_zone.check(bounding_boxes)
-        else:
-            triggered = bounding_boxes  # Process all if no trigger zone
+            triggered = trigger_zone.check(triggered)
 
         # ─── Step 4: Plate Detection & OCR ────────────────────────
         for (vx, vy, vw, vh) in triggered:
             # Add padding to the vehicle bounding box to ensure we capture the bumper/plate
             # even if the motion detector only caught the headlights
-            pad_x = 100
-            pad_y = 100
+            pad_x = 70
+            pad_y = 70
             x1 = max(0, vx - pad_x)
             y1 = max(0, vy - pad_y)
             x2 = min(roi.shape[1], vx + vw + pad_x)
@@ -186,75 +221,142 @@ def run_pipeline():
             if vehicle_region.size == 0:
                 continue
 
-            # Detect plate candidates
-            candidates = plate_detector.detect(vehicle_region)
+            # Detect plate candidates from the tighter vehicle plate zone.
+            candidates = plate_detector.detect_in_vehicle_region(roi, (x1, y1, x2 - x1, y2 - y1))
+            best_detection = None
 
-            for candidate in candidates:
+            for candidate in candidates[: Config.PLATE_OCR_TOP_K]:
                 plate_img = candidate["plate_image"]
                 bbox = candidate["bbox"]
                 sharpness = candidate["sharpness"]
+                plate_area = plate_img.shape[0] * plate_img.shape[1]
+                plate_score = candidate.get("score", 0.0)
+                bx, by, bw, bh = bbox
+                position_score = max(0.0, min(1.0, (by + bh / 2.0) / max(roi.shape[0], 1)))
 
-                # Preprocess for OCR
-                processed = preprocessor.preprocess_for_ocr(plate_img)
+                # Try OCR on the enhanced crop first, then on the raw crop as a fallback.
+                ocr_inputs = [preprocessor.preprocess_for_ocr(plate_img), plate_img]
 
-                # Run OCR
-                text, confidence = ocr_engine.recognize(plate_img)
+                for ocr_input in ocr_inputs:
+                    text, confidence = ocr_engine.recognize(ocr_input)
 
-                if text and len(text.replace(" ", "")) >= 4:
-                    # Check deduplication
-                    if plate_manager.is_duplicate(text):
+                    if not text:
                         continue
 
-                    # Check blacklist
-                    is_blacklisted = plate_manager.is_blacklisted(text)
+                    normalized_text = plate_manager.normalize_plate_text(text)
+                    alnum_len = len(normalized_text)
+                    if alnum_len < 4:
+                        continue
 
-                    # Save plate image
-                    image_filename = plate_manager.save_plate_image(plate_img)
+                    # Prefer valid Indian plates, but keep strong alphanumeric reads
+                    # so a partially imperfect OCR pass can still save the plate.
+                    is_valid_plate = ocr_engine.validate_indian_plate(normalized_text)
+                    strong_read = confidence >= 0.35 and plate_score >= 28.0 and alnum_len >= 6
+                    if not is_valid_plate and not strong_read:
+                        continue
 
-                    # Record stats
-                    plate_manager.record_detection(confidence)
-
-                    # Store in database (async from sync thread)
-                    detection_data = {
-                        "plate_text": text,
-                        "confidence": round(confidence, 3),
-                        "timestamp": datetime.now().isoformat(),
-                        "camera_id": Config.CAMERA_ID,
-                        "image_url": f"/plates/{image_filename}",
-                        "is_blacklisted": is_blacklisted,
-                    }
-
-                    # Schedule async tasks
-                    if main_loop is not None:
-                        try:
-                            asyncio.run_coroutine_threadsafe(
-                                _handle_detection(detection_data, image_filename, is_blacklisted),
-                                main_loop,
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to schedule detection: {e}")
-
-                    # Draw detection on display frame
-                    dx = Config.ROI_X1 if Config.ROI_ENABLED else 0
-                    dy = Config.ROI_Y1 if Config.ROI_ENABLED else 0
-                    px, py, pw, ph = bbox
-                    cv2.rectangle(
-                        display_frame,
-                        (px + x1 + dx, py + y1 + dy),
-                        (px + x1 + dx + pw, py + y1 + dy + ph),
-                        (255, 0, 255), 2,
+                    score = (
+                        plate_manager.quality_score(confidence, sharpness, plate_area)
+                        + plate_score
+                        + (position_score * 20.0)
+                        + (60.0 if is_valid_plate else 0.0)
+                        + (10.0 if ocr_input is plate_img else 0.0)
                     )
-                    cv2.putText(
-                        display_frame,
-                        f"{text} ({confidence:.0%})",
-                        (px + x1 + dx, py + y1 + dy - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2,
-                    )
+                    if best_detection is None or score > best_detection["score"]:
+                        best_detection = {
+                            "plate_img": plate_img,
+                            "bbox": bbox,
+                            "sharpness": sharpness,
+                            "plate_area": plate_area,
+                            "text": normalized_text,
+                            "confidence": confidence,
+                            "is_valid_plate": is_valid_plate,
+                            "score": score,
+                        }
 
-                    logger.info(
-                        f"✅ PLATE: {text} | conf={confidence:.2%} | "
-                        f"sharp={sharpness:.1f} | blacklist={is_blacklisted}"
-                    )
+            if not best_detection:
+                continue
+
+            plate_img = best_detection["plate_img"]
+            bbox = best_detection["bbox"]
+            sharpness = best_detection["sharpness"]
+            plate_area = best_detection["plate_area"]
+            text = best_detection["text"]
+            confidence = best_detection["confidence"]
+            is_valid_plate = best_detection["is_valid_plate"]
+
+            # Skip weak partial reads unless they look strongly like a proper plate.
+            if not is_valid_plate and confidence < 0.35:
+                continue
+
+            decision = plate_manager.evaluate_detection(text, confidence, sharpness, plate_area)
+            if decision["action"] == "skip":
+                continue
+
+            # Save or replace the best available crop for this plate.
+            if decision["action"] == "replace" and decision["replace_filename"]:
+                image_filename = plate_manager.save_plate_image(plate_img, filename=decision["replace_filename"])
+            else:
+                image_filename = plate_manager.save_plate_image(plate_img)
+
+            plate_manager.commit_detection(
+                text,
+                image_filename,
+                confidence,
+                sharpness,
+                plate_area=plate_area,
+                matched_key=decision["matched_key"],
+            )
+
+            # Only brand-new detections are stored in the database and broadcast.
+            if decision["action"] == "new":
+                is_blacklisted = plate_manager.is_blacklisted(text)
+
+                # Record stats
+                plate_manager.record_detection(confidence)
+
+                # Store in database (async from sync thread)
+                detection_data = {
+                    "plate_text": text,
+                    "confidence": round(confidence, 3),
+                    "timestamp": datetime.now().isoformat(),
+                    "camera_id": Config.CAMERA_ID,
+                    "image_url": f"/plates/{image_filename}",
+                    "is_blacklisted": is_blacklisted,
+                }
+
+                if main_loop is not None:
+                    try:
+                        # include a stable id so clients can deduplicate reliably
+                        detection_data["id"] = image_filename
+                        asyncio.run_coroutine_threadsafe(
+                            _handle_detection(detection_data, image_filename, is_blacklisted),
+                            main_loop,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to schedule detection: {e}")
+
+                logger.info(
+                    f"✅ PLATE: {text} | conf={confidence:.2%} | "
+                    f"sharp={sharpness:.1f} | blacklist={is_blacklisted}"
+                )
+
+            # Draw the best detection on the display frame for visibility.
+            dx = Config.ROI_X1 if Config.ROI_ENABLED else 0
+            dy = Config.ROI_Y1 if Config.ROI_ENABLED else 0
+            px, py, pw, ph = bbox
+            cv2.rectangle(
+                display_frame,
+                (px + x1 + dx, py + y1 + dy),
+                (px + x1 + dx + pw, py + y1 + dy + ph),
+                (255, 0, 255), 2,
+            )
+            cv2.putText(
+                display_frame,
+                f"{text} ({confidence:.0%})",
+                (px + x1 + dx, py + y1 + dy - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2,
+            )
 
         # ─── Step 5: Add overlay info ─────────────────────────────
         cv2.putText(

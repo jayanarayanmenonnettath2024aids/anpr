@@ -9,16 +9,21 @@ import io
 import logging
 from datetime import datetime
 from collections import OrderedDict
+import threading
+import re
 
 logger = logging.getLogger(__name__)
+from difflib import SequenceMatcher
 
 
 class PlateManager:
     def __init__(self, dedup_window=30, blacklist=None, plates_dir="plates"):
         self.dedup_window = dedup_window
+        self.similarity_threshold = 0.86
         self.blacklist = set(blacklist or [])
         self.plates_dir = plates_dir
-        self._recent_plates = OrderedDict()  # plate_text -> last_seen_time
+        self._recent_plates = OrderedDict()  # normalized_plate -> record
+        self._lock = threading.Lock()
         self._plate_counter = 0
         self._detections_today = 0
         self._detection_times = []  # timestamps for plates/min calc
@@ -27,32 +32,134 @@ class PlateManager:
 
         os.makedirs(plates_dir, exist_ok=True)
 
-    def is_duplicate(self, plate_text):
-        """
-        Check if this plate was recently detected.
-        Returns True if duplicate (should be suppressed).
-        """
+    @staticmethod
+    def normalize_plate_text(plate_text):
         if not plate_text:
+            return ""
+        return re.sub(r"[^A-Z0-9]", "", plate_text.upper().replace(" ", ""))
+
+    @staticmethod
+    def is_valid_indian_plate(text):
+        clean = PlateManager.normalize_plate_text(text)
+        pattern = r"^[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{4}$"
+        return bool(re.match(pattern, clean))
+
+    @staticmethod
+    def same_plate(a, b):
+        a_norm = PlateManager.normalize_plate_text(a)
+        b_norm = PlateManager.normalize_plate_text(b)
+
+        if not a_norm or not b_norm:
+            return False
+
+        if a_norm == b_norm:
             return True
+
+        # Treat partial OCR fragments as the same detection when one string is
+        # clearly contained inside the other.
+        short, long = sorted((a_norm, b_norm), key=len)
+        if len(short) >= 5 and short in long:
+            return True
+
+        # Many Indian plate OCR errors drop the state code but preserve the rest.
+        if len(a_norm) >= 4 and len(b_norm) >= 4 and a_norm[-4:] == b_norm[-4:]:
+            return True
+
+        return SequenceMatcher(None, a_norm, b_norm).ratio() >= 0.82
+
+    @staticmethod
+    def similarity(a, b):
+        return SequenceMatcher(None, a, b).ratio()
+
+    @staticmethod
+    def quality_score(confidence, sharpness, plate_area=0):
+        # Confidence carries the most weight, but a sharper/larger crop can
+        # replace an earlier fuzzy one for the same plate.
+        return (
+            confidence * 100.0
+            + min(sharpness, 250.0) * 0.25
+            + min(plate_area / 1000.0, 10.0)
+        )
+
+    def _purge_expired_locked(self, current_time):
+        expired = [
+            k for k, record in self._recent_plates.items()
+            if current_time - record["last_seen"] > self.dedup_window
+        ]
+        for key in expired:
+            del self._recent_plates[key]
+
+    def evaluate_detection(self, plate_text, confidence, sharpness, plate_area=0):
+        """
+        Decide whether a detection is new, a duplicate, or a better version of
+        a similar recent plate.
+
+        Returns a dict with:
+        - action: "new", "replace", or "skip"
+        - matched_key: matched recent plate key if any
+        - replace_filename: filename to overwrite for better duplicates
+        - score: current quality score
+        """
+        normalized = self.normalize_plate_text(plate_text)
+        if not normalized:
+            return {"action": "skip", "matched_key": None, "replace_filename": None, "score": 0.0}
 
         current_time = time.time()
+        score = self.quality_score(confidence, sharpness, plate_area)
 
-        # Clean expired entries
-        expired = [
-            k for k, t in self._recent_plates.items()
-            if current_time - t > self.dedup_window
-        ]
-        for k in expired:
-            del self._recent_plates[k]
+        with self._lock:
+            self._purge_expired_locked(current_time)
 
-        # Check if already seen
-        normalized = plate_text.replace(" ", "").upper()
-        if normalized in self._recent_plates:
-            return True
+            matched_key = None
+            matched_ratio = 0.0
+            for key in self._recent_plates.keys():
+                ratio = 1.0 if key == normalized else self.similarity(normalized, key)
+                if self.same_plate(normalized, key) and ratio > matched_ratio:
+                    matched_key = key
+                    matched_ratio = ratio
 
-        # Mark as seen
-        self._recent_plates[normalized] = current_time
-        return False
+            if matched_key is None:
+                return {"action": "new", "matched_key": normalized, "replace_filename": None, "score": score}
+
+            record = self._recent_plates[matched_key]
+            record["last_seen"] = current_time
+            self._recent_plates.move_to_end(matched_key)
+
+            if score > record["score"]:
+                return {
+                    "action": "replace",
+                    "matched_key": matched_key,
+                    "replace_filename": record["image_filename"],
+                    "score": score,
+                }
+
+            return {
+                "action": "skip",
+                "matched_key": matched_key,
+                "replace_filename": record["image_filename"],
+                "score": record["score"],
+            }
+
+    def commit_detection(self, plate_text, image_filename, confidence, sharpness, plate_area=0, matched_key=None):
+        """Persist/update the in-memory recent detection cache."""
+        normalized = matched_key or self.normalize_plate_text(plate_text)
+        if not normalized:
+            return
+
+        current_time = time.time()
+        score = self.quality_score(confidence, sharpness, plate_area)
+
+        with self._lock:
+            self._purge_expired_locked(current_time)
+            self._recent_plates[normalized] = {
+                "plate_text": plate_text,
+                "image_filename": image_filename,
+                "confidence": confidence,
+                "sharpness": sharpness,
+                "score": score,
+                "last_seen": current_time,
+            }
+            self._recent_plates.move_to_end(normalized)
 
     def is_blacklisted(self, plate_text):
         """Check if plate is in the blacklist."""
@@ -71,16 +178,17 @@ class PlateManager:
         normalized = plate_text.replace(" ", "").upper()
         self.blacklist.discard(normalized)
 
-    def save_plate_image(self, plate_image):
+    def save_plate_image(self, plate_image, filename=None):
         """
         Save cropped plate image to disk.
         Returns the filename.
         """
         import cv2
 
-        self._plate_counter += 1
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"plate_{timestamp}_{self._plate_counter:04d}.jpg"
+        if filename is None:
+            self._plate_counter += 1
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"plate_{timestamp}_{self._plate_counter:04d}.jpg"
         filepath = os.path.join(self.plates_dir, filename)
 
         cv2.imwrite(filepath, plate_image)

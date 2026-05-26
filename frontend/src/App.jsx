@@ -52,7 +52,7 @@ function App() {
                 </div>
               ) : (
                 detections.map((d, i) => (
-                  <PlateCard key={`${d.plate_text}-${d.timestamp}-${i}`} detection={d} />
+                  <PlateCard key={d._dedupKey || `${d.plate_text}-${i}`} detection={d} />
                 ))
               )}
             </div>
