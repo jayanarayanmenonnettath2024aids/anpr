@@ -17,6 +17,7 @@ class Preprocessor:
         adaptive_block_size=11,
         adaptive_c=2,
         morph_kernel_size=(3, 3),
+        superres_model_path=None,
     ):
         self.bilateral_d = bilateral_d
         self.bilateral_sigma_color = bilateral_sigma_color
@@ -28,6 +29,7 @@ class Preprocessor:
         self.morph_kernel = cv2.getStructuringElement(
             cv2.MORPH_RECT, morph_kernel_size
         )
+        self.superres_model_path = superres_model_path
 
     def to_grayscale(self, frame):
         """Convert BGR image to grayscale."""
@@ -64,6 +66,43 @@ class Preprocessor:
         opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, self.morph_kernel, iterations=1)
         return opened
 
+    def apply_super_resolution(self, image, scale=2):
+        """
+        Upscale small plate crops before OCR.
+
+        Tries OpenCV DNN super-resolution when a model is available; otherwise
+        falls back to high-quality interpolation plus a mild sharpening pass.
+        """
+        if image is None or image.size == 0:
+            return image
+
+        scale = max(1, int(scale))
+
+        # Prefer OpenCV DNN super-resolution when the contrib module and model
+        # are available, but never fail the pipeline if they are missing.
+        try:
+            import os
+
+            model_path = getattr(self, "superres_model_path", None)
+            if model_path and os.path.exists(model_path):
+                from cv2 import dnn_superres
+
+                upsampler = dnn_superres.DnnSuperResImpl_create()
+                # EDSR is a good default for text-like plate crops.
+                upsampler.readModel(model_path)
+                upsampler.setModel("edsr", scale)
+                return upsampler.upsample(image)
+        except Exception:
+            # Fall back to interpolation below.
+            pass
+
+        interpolation = cv2.INTER_CUBIC if scale <= 2 else cv2.INTER_LANCZOS4
+        enlarged = cv2.resize(image, None, fx=scale, fy=scale, interpolation=interpolation)
+
+        # Mild sharpening helps keep character edges crisp after scaling.
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        return cv2.filter2D(enlarged, -1, kernel)
+
     def preprocess_for_edges(self, frame):
         """
         Full preprocessing pipeline for edge-based plate detection.
@@ -87,10 +126,15 @@ class Preprocessor:
         """
         gray = self.to_grayscale(plate_image)
 
-        # Resize to improve OCR (target height ~64px)
+        # Super-resolve crops to ensure sharp character edges for OCR.
         h, w = gray.shape[:2]
-        if h < 40:
-            scale = 64.0 / h
+        if h < 150 or w < 300:
+            gray = self.apply_super_resolution(gray, scale=2)
+
+        # Resize to improve OCR (target height ~96px)
+        h, w = gray.shape[:2]
+        if h < 96:
+            scale = 96.0 / max(h, 1)
             gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
         # Keep OCR preprocessing lightweight for real-time throughput.

@@ -168,7 +168,7 @@ class OCREngine:
 
         # Tesseract config for license plates
         config = (
-            "--oem 3 --psm 6 "
+            "--oem 3 --psm 7 "
             "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         )
 
@@ -200,26 +200,38 @@ class OCREngine:
         - Uppercase
         - Fix common confusions
         """
-        # Remove everything except letters, digits, spaces
-        text = re.sub(r"[^A-Za-z0-9\s]", "", text)
+        # Remove everything except letters, digits (like INPR removal of punctuation)
+        text = re.sub(r"[^A-Za-z0-9]", "", text)
         text = text.upper().strip()
-
-        # Remove excessive spaces
-        text = re.sub(r"\s+", " ", text)
-
         return text
 
     @staticmethod
     def validate_indian_plate(text):
         """
-        Validate against common Indian plate formats.
-        Examples: KA01AB1234, MH02CD5678, DL3CAB1234
-        
-        Returns True if it loosely matches an Indian plate pattern.
+        Validate against common Indian plate formats based on INPR logic.
+        Validates state code and applies strict regex pattern match.
         """
-        # Remove spaces
-        clean = text.replace(" ", "")
-
-        # Indian plate pattern: 2 letters + 2 digits + 1-3 letters + 4 digits
-        pattern = r"^[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{4}$"
-        return bool(re.match(pattern, clean))
+        clean = text.upper()
+        
+        # INPR defined state codes
+        valid_states = [
+            'AP', 'AR', 'AS', 'BR', 'CG', 'GA', 'GJ', 'HR', 'HP', 'JK', 'JH', 
+            'KA', 'KL', 'MP', 'MH', 'MN', 'ML', 'MZ', 'NL', 'OD', 'PB', 'RJ', 
+            'SK', 'TN', 'TS', 'TR', 'UA', 'UK', 'UP', 'WB', 'AN', 'CH', 'DN', 
+            'DD', 'DL', 'LD', 'PY'
+        ]
+        
+        # Check if the plate starts with a valid state code
+        if clean[:2] not in valid_states:
+            return False
+            
+        # INPR specific patterns
+        # pattern_1: 2 chars + 2 digits + 2 chars + 4 digits
+        # pattern_2: 2 chars + 2 digits + 1 char + 4 digits
+        pattern_1 = r"^[A-Z]{2}\d{2}[A-Z]{2}\d{4}$"
+        pattern_2 = r"^[A-Z]{2}\d{2}[A-Z]{1}\d{4}$"
+        
+        if re.match(pattern_1, clean) or re.match(pattern_2, clean):
+            return True
+            
+        return False

@@ -20,6 +20,7 @@ from pipeline.video_capture import VideoCapture
 from pipeline.motion_detector import MotionDetector
 from pipeline.trigger_zone import TriggerZone
 from pipeline.plate_detector import PlateDetector
+from pipeline.inpr_detector import INPRPlateDetector
 from pipeline.preprocessor import Preprocessor
 from pipeline.ocr_engine import OCREngine
 from services.plate_manager import PlateManager
@@ -57,16 +58,32 @@ trigger_zone = TriggerZone(
     tolerance=Config.TRIGGER_TOLERANCE,
     cooldown=Config.TRIGGER_COOLDOWN,
 )
-plate_detector = PlateDetector(
-    min_aspect_ratio=Config.PLATE_MIN_ASPECT_RATIO,
-    max_aspect_ratio=Config.PLATE_MAX_ASPECT_RATIO,
-    min_area=Config.PLATE_MIN_AREA,
-    max_area=Config.PLATE_MAX_AREA,
-    approx_epsilon=Config.PLATE_APPROX_EPSILON,
-    max_candidates=Config.PLATE_MAX_CANDIDATES,
-    sharpness_threshold=Config.SHARPNESS_THRESHOLD,
-)
-preprocessor = Preprocessor()
+if Config.DETECTOR_BACKEND.lower() == "inpr":
+    plate_detector = INPRPlateDetector(
+        model_dir=Config.INPR_MODEL_DIR,
+        score_threshold=Config.INPR_SCORE_THRESHOLD,
+    )
+    if not plate_detector.available:
+        plate_detector = PlateDetector(
+            min_aspect_ratio=Config.PLATE_MIN_ASPECT_RATIO,
+            max_aspect_ratio=Config.PLATE_MAX_ASPECT_RATIO,
+            min_area=Config.PLATE_MIN_AREA,
+            max_area=Config.PLATE_MAX_AREA,
+            approx_epsilon=Config.PLATE_APPROX_EPSILON,
+            max_candidates=Config.PLATE_MAX_CANDIDATES,
+            sharpness_threshold=Config.SHARPNESS_THRESHOLD,
+        )
+else:
+    plate_detector = PlateDetector(
+        min_aspect_ratio=Config.PLATE_MIN_ASPECT_RATIO,
+        max_aspect_ratio=Config.PLATE_MAX_ASPECT_RATIO,
+        min_area=Config.PLATE_MIN_AREA,
+        max_area=Config.PLATE_MAX_AREA,
+        approx_epsilon=Config.PLATE_APPROX_EPSILON,
+        max_candidates=Config.PLATE_MAX_CANDIDATES,
+        sharpness_threshold=Config.SHARPNESS_THRESHOLD,
+    )
+preprocessor = Preprocessor(superres_model_path=Config.OCR_SUPERRES_MODEL if Config.OCR_SUPERRES_ENABLED else None)
 ocr_engine = OCREngine(
     engine=Config.OCR_ENGINE,
     lang=Config.OCR_LANGUAGE,
@@ -80,6 +97,7 @@ pipeline_thread = None
 latest_annotated_frame = None
 frame_lock = threading.Lock()
 main_loop = None
+_detect_buffer = {}
 
 
 def select_primary_motion_box(bounding_boxes, frame_width, frame_height):
@@ -143,6 +161,9 @@ def run_pipeline():
         # Frame skipping
         if frame_count % Config.FRAME_SKIP != 0:
             continue
+
+        # Convert to grayscale for detection but keep 3 channels for drawing/models
+        frame = cv2.cvtColor(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
 
         original_frame = frame.copy()
         display_frame = frame.copy()
@@ -229,6 +250,11 @@ def run_pipeline():
                 plate_img = candidate["plate_image"]
                 bbox = candidate["bbox"]
                 sharpness = candidate["sharpness"]
+                
+                # 1. Early Blur Rejection
+                if sharpness < Config.SHARPNESS_THRESHOLD:
+                    continue
+
                 plate_area = plate_img.shape[0] * plate_img.shape[1]
                 plate_score = candidate.get("score", 0.0)
                 bx, by, bw, bh = bbox
@@ -248,10 +274,14 @@ def run_pipeline():
                     if alnum_len < 4:
                         continue
 
+                    # 2. Strict Filter: Must contain at least one digit
+                    if not any(char.isdigit() for char in normalized_text):
+                        continue
+
                     # Prefer valid Indian plates, but keep strong alphanumeric reads
                     # so a partially imperfect OCR pass can still save the plate.
                     is_valid_plate = ocr_engine.validate_indian_plate(normalized_text)
-                    strong_read = confidence >= 0.35 and plate_score >= 28.0 and alnum_len >= 6
+                    strong_read = confidence >= 0.45 and plate_score >= 28.0 and alnum_len >= 6
                     if not is_valid_plate and not strong_read:
                         continue
 
@@ -284,10 +314,6 @@ def run_pipeline():
             text = best_detection["text"]
             confidence = best_detection["confidence"]
             is_valid_plate = best_detection["is_valid_plate"]
-
-            # Skip weak partial reads unless they look strongly like a proper plate.
-            if not is_valid_plate and confidence < 0.35:
-                continue
 
             decision = plate_manager.evaluate_detection(text, confidence, sharpness, plate_area)
             if decision["action"] == "skip":
@@ -488,6 +514,136 @@ app.mount("/plates", StaticFiles(directory=Config.PLATES_DIR), name="plates")
 # Include routers
 app.include_router(ws.router)
 app.include_router(api.router)
+
+
+@app.post("/detect")
+async def detect_endpoint(file: bytes = None, session_id: str | None = None):
+    """
+    Lightweight detection API for single-frame or short-burst aggregation.
+    Accepts raw image bytes (multipart/form-data file upload) and returns a
+    best-guess plate with confidence and timestamp. If `session_id` is
+    provided, the service will aggregate recent reads for that session and
+    prefer the most frequent/highest-confidence result.
+    """
+    from fastapi import UploadFile, File, Form
+    import numpy as np
+    import cv2
+    import io
+    import time as _time
+    from collections import Counter
+
+    # Read bytes from request payload. FastAPI will pass raw bytes for body,
+    # but clients usually send multipart form 'file'. Try to handle both.
+    image_bytes = None
+    if isinstance(file, (bytes, bytearray)) and len(file) > 0:
+        image_bytes = bytes(file)
+    else:
+        # Try reading from form upload (compatibility)
+        # This branch supports tools that POST as multipart/form-data.
+        try:
+            from fastapi import Request
+            # Access request body isn't straightforward here; return empty result.
+            return {"plate": None, "confidence": 0.0, "timestamp": __import__("datetime").datetime.now().isoformat()}
+        except Exception:
+            return {"plate": None, "confidence": 0.0, "timestamp": __import__("datetime").datetime.now().isoformat()}
+
+    # Decode image
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return {"plate": None, "confidence": 0.0, "timestamp": __import__("datetime").datetime.now().isoformat()}
+
+    # Run plate detection
+    candidates = plate_detector.detect(frame)
+    best_detection = None
+
+    for candidate in candidates[: Config.PLATE_OCR_TOP_K]:
+        plate_img = candidate["plate_image"]
+        sharpness = candidate.get("sharpness", 0.0)
+        
+        # 1. Early Blur Rejection
+        if sharpness < Config.SHARPNESS_THRESHOLD:
+            continue
+
+        plate_area = plate_img.shape[0] * plate_img.shape[1]
+
+        # Try preprocessed then raw
+        ocr_inputs = [preprocessor.preprocess_for_ocr(plate_img), plate_img]
+        for ocr_input in ocr_inputs:
+            text, confidence = ocr_engine.recognize(ocr_input)
+            if not text:
+                continue
+
+            normalized = plate_manager.normalize_plate_text(text)
+            if len(normalized) < 4:
+                continue
+
+            # 2. Strict Filter: Must contain at least one digit
+            if not any(char.isdigit() for char in normalized):
+                continue
+
+            score = plate_manager.quality_score(confidence, sharpness, plate_area)
+            if best_detection is None or score > best_detection["score"]:
+                best_detection = {
+                    "text": normalized,
+                    "confidence": confidence,
+                    "sharpness": sharpness,
+                    "plate_area": plate_area,
+                    "plate_img": plate_img,
+                    "score": score,
+                }
+
+    if not best_detection:
+        return {"plate": None, "confidence": 0.0, "timestamp": __import__("datetime").datetime.now().isoformat()}
+
+    # Aggregation buffer (in-memory, short lived)
+    key = session_id or "global"
+    buf = _detect_buffer.get(key, [])
+    buf.append({"plate": best_detection["text"], "conf": best_detection["confidence"], "t": _time.time()})
+
+    # Keep only the last few seconds (short burst window)
+    window_secs = max(1.0, min(8.0, Config.FRAME_SKIP * 0.5 + 2.0))
+    cutoff = _time.time() - window_secs
+    buf = [b for b in buf if b["t"] > cutoff]
+    _detect_buffer[key] = buf
+
+    plates = [b["plate"] for b in buf if b.get("plate")]
+    if not plates:
+        chosen_plate = best_detection["text"]
+        chosen_conf = best_detection["confidence"]
+    else:
+        counts = Counter(plates)
+        chosen_plate = counts.most_common(1)[0][0]
+        confidences = [b["conf"] for b in buf if b.get("plate") == chosen_plate]
+        chosen_conf = sum(confidences) / len(confidences) if confidences else best_detection["confidence"]
+
+    timestamp = __import__("datetime").datetime.now().isoformat()
+
+    # Save crop, commit to plate manager and broadcast (reuse pipeline handler)
+    image_filename = plate_manager.save_plate_image(best_detection["plate_img"])
+    plate_manager.commit_detection(chosen_plate, image_filename, chosen_conf, best_detection["sharpness"], plate_area=best_detection["plate_area"], matched_key=None)
+    plate_manager.record_detection(chosen_conf)
+
+    detection_data = {
+        "plate_text": chosen_plate,
+        "confidence": round(chosen_conf, 3),
+        "timestamp": timestamp,
+        "camera_id": Config.CAMERA_ID,
+        "image_url": f"/plates/{image_filename}",
+        "is_blacklisted": plate_manager.is_blacklisted(chosen_plate),
+    }
+
+    # Schedule async database insert and websocket broadcast
+    if main_loop is not None:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _handle_detection(detection_data, image_filename, detection_data["is_blacklisted"]),
+                main_loop,
+            )
+        except Exception as e:
+            logger.error(f"Failed to schedule detection from /detect: {e}")
+
+    return {"plate": chosen_plate, "confidence": round(chosen_conf, 3), "timestamp": timestamp}
 
 
 @app.get("/")

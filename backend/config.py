@@ -7,7 +7,7 @@ import os
 
 class Config:
     # ─── Video Source ──────────────────────────────────────────────
-    VIDEO_SOURCE = os.getenv("VIDEO_SOURCE", "video/videoq.mp4")  # file path or rtsp:// URL
+    VIDEO_SOURCE = os.getenv("VIDEO_SOURCE", "../video/video.mp4")  # file path or rtsp:// URL
     CAMERA_ID = os.getenv("CAMERA_ID", "CAM-01")
 
     # ─── ROI Cropping (y1, y2, x1, x2) ────────────────────────────
@@ -21,7 +21,7 @@ class Config:
     # ─── Motion Detection (MOG2) ──────────────────────────────────
     MOG2_HISTORY = 250
     MOG2_VAR_THRESHOLD = 50
-    MOG2_DETECT_SHADOWS = True
+    MOG2_DETECT_SHADOWS = False
     MIN_CONTOUR_AREA = 3500  # px² — ignore contours smaller than this
 
     # ─── Trigger Zone ─────────────────────────────────────────────
@@ -49,10 +49,20 @@ class Config:
     MORPH_KERNEL_SIZE = (3, 3)
 
     # ─── OCR ──────────────────────────────────────────────────────
-    OCR_ENGINE = os.getenv("OCR_ENGINE", "tesseract")  # "paddleocr", "tesseract", or "easyocr"
+    OCR_ENGINE = os.getenv("OCR_ENGINE", "paddleocr")  # "paddleocr", "tesseract", or "easyocr"
     OCR_LANGUAGE = "en"
-    OCR_CONFIDENCE_THRESHOLD = 0.25
+    OCR_CONFIDENCE_THRESHOLD = 0.45
     OCR_USE_ANGLE_CLS = False
+    OCR_SUPERRES_ENABLED = os.getenv("OCR_SUPERRES_ENABLED", "true").lower() == "true"
+    OCR_SUPERRES_SCALE = int(os.getenv("OCR_SUPERRES_SCALE", "2"))
+    OCR_SUPERRES_MODEL = os.getenv("OCR_SUPERRES_MODEL", "backend/models/superres/EDSR_x2.pb")
+
+    # ─── Detection Backend ────────────────────────────────────────
+    DETECTOR_BACKEND = os.getenv("DETECTOR_BACKEND", "inpr")  # "contour" or "inpr"
+    INPR_MODEL_DIR = os.getenv("INPR_MODEL_DIR", "backend/models/inpr")
+    INPR_MODEL_WEIGHTS = os.getenv("INPR_MODEL_WEIGHTS", "backend/models/inpr/model_final.pth")
+    INPR_MODEL_CONFIG = os.getenv("INPR_MODEL_CONFIG", "backend/models/inpr/config.yaml")
+    INPR_SCORE_THRESHOLD = float(os.getenv("INPR_SCORE_THRESHOLD", "0.70"))
 
     # ─── Sharpness Selection ─────────────────────────────────────
     SHARPNESS_THRESHOLD = 8.0  # Laplacian variance — reject below this

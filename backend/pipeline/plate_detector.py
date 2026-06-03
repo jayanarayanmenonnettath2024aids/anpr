@@ -189,13 +189,11 @@ class PlateDetector:
             list of plate candidates with global coordinates
         """
         vx, vy, vw, vh = vehicle_bbox
-        # Use only the lower-middle of the vehicle body. This avoids ground,
-        # roofline, and neighboring car fragments that often get picked up by
-        # the motion box but are not part of the license plate area.
-        sx1 = vx + int(vw * 0.08)
-        sx2 = vx + int(vw * 0.92)
-        sy1 = vy + int(vh * 0.28)
-        sy2 = vy + int(vh * 0.88)
+        # Use a slightly wider region to prevent cutting off the edges of the plate
+        sx1 = vx + int(vw * 0.02)
+        sx2 = vx + int(vw * 0.98)
+        sy1 = vy + int(vh * 0.20)
+        sy2 = vy + int(vh * 0.95)
 
         vehicle_roi = frame[sy1:sy2, sx1:sx2]
 

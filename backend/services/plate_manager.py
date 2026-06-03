@@ -45,6 +45,18 @@ class PlateManager:
         return bool(re.match(pattern, clean))
 
     @staticmethod
+    def fuzzy_normalize(text):
+        if not text: return ""
+        text = PlateManager.normalize_plate_text(text)
+        # Map visually similar characters to a single representation for deduplication
+        cmap = {
+            'O': '0', 'Q': '0', 'D': '0',
+            'I': '1', 'L': '1',
+            'Z': '2', 'S': '5', 'B': '8', 'G': '6', 'A': '4'
+        }
+        return "".join(cmap.get(c, c) for c in text)
+
+    @staticmethod
     def same_plate(a, b):
         a_norm = PlateManager.normalize_plate_text(a)
         b_norm = PlateManager.normalize_plate_text(b)
@@ -55,17 +67,27 @@ class PlateManager:
         if a_norm == b_norm:
             return True
 
+        # Use fuzzy normalized strings to catch heavy OCR mangling (O vs 0, Z vs 2)
+        a_fuzz = PlateManager.fuzzy_normalize(a_norm)
+        b_fuzz = PlateManager.fuzzy_normalize(b_norm)
+
         # Treat partial OCR fragments as the same detection when one string is
         # clearly contained inside the other.
-        short, long = sorted((a_norm, b_norm), key=len)
+        short, long = sorted((a_fuzz, b_fuzz), key=len)
         if len(short) >= 5 and short in long:
             return True
 
-        # Many Indian plate OCR errors drop the state code but preserve the rest.
-        if len(a_norm) >= 4 and len(b_norm) >= 4 and a_norm[-4:] == b_norm[-4:]:
+        # Check if they share a significant common substring (at least 5 chars)
+        matcher = SequenceMatcher(None, a_fuzz, b_fuzz)
+        match = matcher.find_longest_match(0, len(a_fuzz), 0, len(b_fuzz))
+        if match.size >= 5:
             return True
 
-        return SequenceMatcher(None, a_norm, b_norm).ratio() >= 0.82
+        # Many Indian plate OCR errors drop the state code but preserve the rest.
+        if len(a_fuzz) >= 4 and len(b_fuzz) >= 4 and a_fuzz[-4:] == b_fuzz[-4:]:
+            return True
+
+        return matcher.ratio() >= 0.65
 
     @staticmethod
     def similarity(a, b):

@@ -1,0 +1,3 @@
+@echo off
+echo Redirecting to start.bat...
+call start.bat

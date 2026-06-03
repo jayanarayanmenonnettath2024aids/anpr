@@ -8,9 +8,15 @@ numpy>=1.26.0
 pydantic>=2.0.0
 python-multipart==0.0.9
 
-# Primary (recommended but not supported on Python 3.13+):
-# paddleocr>=2.7.0
-# paddlepaddle>=2.6.0
+# Primary OCR stack:
+paddleocr>=2.7.0
+
+# PaddlePaddle is the backend for PaddleOCR. Keep this pinned to a version
+# that matches the local Python/runtime constraints.
+paddlepaddle>=2.6.0
+
+# Optional detector backend for the INPR model:
+# detectron2
 
 # Fallback (using this due to Python version):
 pytesseract>=0.3.10
