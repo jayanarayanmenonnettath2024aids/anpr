@@ -1,1 +1,2 @@
+*.pth filter=lfs diff=lfs merge=lfs -text
 backend/backend/models/inpr/model_final.pth filter=lfs diff=lfs merge=lfs -text
