@@ -150,6 +150,11 @@ class Preprocessor:
             cv2.THRESH_BINARY + cv2.THRESH_OTSU,
         )
 
+        # Add morphological operations (erosion and dilation)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        thresh = cv2.erode(thresh, kernel, iterations=1)
+        thresh = cv2.dilate(thresh, kernel, iterations=1)
+
         # Add a white border (padding) which significantly improves Tesseract accuracy
         thresh = cv2.copyMakeBorder(thresh, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 

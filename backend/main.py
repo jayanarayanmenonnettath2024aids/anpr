@@ -162,11 +162,24 @@ def run_pipeline():
         if frame_count % Config.FRAME_SKIP != 0:
             continue
 
-        # Convert to grayscale for detection but keep 3 channels for drawing/models
-        frame = cv2.cvtColor(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+        # Convert to grayscale for the detection pipeline
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
 
         original_frame = frame.copy()
-        display_frame = frame.copy()
+
+        # Apply adaptive thresholding and morphology for the display frame
+        # This reduces noise and makes the number plate visible while keeping the B&W effect
+        blurred = cv2.GaussianBlur(gray_frame, (5, 5), 0)
+        bw_display = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY, 15, 8
+        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        bw_display = cv2.erode(bw_display, kernel, iterations=1)
+        bw_display = cv2.dilate(bw_display, kernel, iterations=1)
+        
+        display_frame = cv2.cvtColor(bw_display, cv2.COLOR_GRAY2BGR)
 
         # ─── Step 1: ROI Cropping ─────────────────────────────────
         if Config.ROI_ENABLED:
